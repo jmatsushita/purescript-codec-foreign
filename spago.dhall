@@ -1,4 +1,4 @@
-{ name = "my-project"
+{ name = "purescript-codec-foreign"
 , dependencies =
   [ "aff"
   , "arrays"
