@@ -8,7 +8,7 @@ import Control.Monad.Writer (Writer, mapWriter, writer)
 import Data.Array as Array
 import Data.Bifunctor (lmap, rmap)
 import Data.Codec as C
-import Data.Either (Either(..), note)
+import Data.Either (Either(..), either, note)
 import Data.Generic.Rep (class Generic)
 import Data.List (List, (:))
 import Data.List as List
@@ -339,6 +339,17 @@ prismaticCodec name preview view orig = C.basicCodec dec enc
     a ← C.decode orig f
     note (Named name (UnexpectedValue (_stringify f))) (preview a)
   enc = C.encode orig <<< view
+
+harismaticCodec
+  ∷ ∀ a b
+  . (a → b)
+  → (b → Either Foreign a)
+  → ForeignCodec a
+  → ForeignCodec b
+harismaticCodec view preview orig = C.basicCodec dec enc
+  where
+  dec = map view <<< C.decode orig
+  enc = either identity (C.encode orig) <<< preview
 
 --
 -- Helper functions 
