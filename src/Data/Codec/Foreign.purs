@@ -4,7 +4,7 @@ import Prelude
 
 import Control.Monad.Except (runExcept, throwError, withExcept)
 import Control.Monad.Reader (ReaderT(..), runReaderT)
-import Control.Monad.Writer (Writer, mapWriter, writer)
+import Control.Monad.Writer (Writer, execWriter, mapWriter, writer)
 import Data.Array as Array
 import Data.Bifunctor (lmap, rmap)
 import Data.Codec as C
@@ -14,6 +14,7 @@ import Data.List (List, (:))
 import Data.List as List
 import Data.List.NonEmpty (foldMap1)
 import Data.Maybe (Maybe(..), fromJust, maybe)
+import Data.Newtype (unwrap)
 import Data.Profunctor.Star (Star(..))
 import Data.String.CodePoints (CodePoint)
 import Data.String.CodePoints as S
@@ -350,6 +351,12 @@ harismaticCodec view preview orig = C.basicCodec dec enc
   where
   dec = map view <<< C.decode orig
   enc = either identity (C.encode orig) <<< preview
+
+encodec ∷ ∀ a. ForeignCodec a → a → Foreign
+encodec c = execWriter <<< unwrap (C.encoder c)
+
+decodec ∷ ∀ a. ForeignCodec a → Foreign → Either ForeignDecodingError a
+decodec c = runReaderT (C.decoder c)
 
 --
 -- Helper functions 
