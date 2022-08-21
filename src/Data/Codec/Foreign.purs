@@ -8,7 +8,7 @@ import Control.Monad.Writer (Writer, mapWriter, writer)
 import Data.Array as Array
 import Data.Bifunctor (lmap, rmap)
 import Data.Codec as C
-import Data.Either (Either(..))
+import Data.Either (Either(..), note)
 import Data.Generic.Rep (class Generic)
 import Data.List (List, (:))
 import Data.List as List
@@ -38,6 +38,7 @@ data ForeignDecodingError
   | MissingValueAtIndex Int
   | MissingValueAtKey String
   | UnexpectedTagValue String
+  | UnexpectedValue String
 
 derive instance Eq ForeignDecodingError
 derive instance Generic ForeignDecodingError _
@@ -59,7 +60,8 @@ printForeignDecodingError err =
     Named name inner → "\tUnder '" <> name <> "':\n" <> go inner
     MissingValueAtIndex ix → "\tNo value was found at index " <> show ix
     MissingValueAtKey key → "\tNo value was found at key " <> show key
-    UnexpectedTagValue ty → "\tUnexpected tag value of type " <> show ty
+    UnexpectedTagValue v → "\tUnexpected tag value: " <> show v
+    UnexpectedValue v → "\tUnexpected value: " <> show v
 
 -- | Codec type for `Foreign` values.
 type ForeignCodec a = C.BasicCodec (Either ForeignDecodingError) Foreign a
@@ -291,6 +293,53 @@ recordProp p codecA codecR =
 fix ∷ ∀ a. (ForeignCodec a → ForeignCodec a) → ForeignCodec a
 fix f = C.basicCodec (\x → C.decode (f (fix f)) x) (\x → C.encode (f (fix f)) x)
 
+-- | Adapts an existing codec with a pair of functions to allow a value to be
+-- | further refined. If the inner decoder fails an `UnexpectedValue` error will
+-- | be raised for Foreign input.
+-- |
+-- | This function is named as such as the pair of functions it accepts
+-- | correspond with the `preview` and `view` functions of a `Prism`-style lens.
+-- |
+-- | An example of this would be a codec for `Data.String.NonEmpty.NonEmptyString`:
+-- |
+-- | ```purescript
+-- | nonEmptyString ∷ CF.ForeignCodec NES.NonEmptyString
+-- | nonEmptyString =
+-- |   CF.prismaticCodec "NonEmptyString" 
+-- |     NES.fromString NES.toString CF.string
+-- | ```
+-- |
+-- | Another example might be to handle a mapping from a small sum type to
+-- | strings:
+-- |
+-- | ```purescript
+-- | data Direction = North | South | West | East
+-- |
+-- | directionCodec :: ForeignCodec Direction
+-- | directionCodec = CF.prismaticCodec "Direction" dec enc string
+-- |   where
+-- |     dec = case _ of
+-- |       "N" -> Just North
+-- |       "S" -> Just South
+-- |       "W" -> Just West
+-- |       "E" -> Just East
+-- |       _ -> Nothing
+-- |
+-- |     enc = case _ of
+-- |       North -> "N"
+-- |       South -> "S"
+-- |       West -> "W"
+-- |       East -> "E"
+-- | ```
+prismaticCodec
+  ∷ ∀ a b. String → (a → Maybe b) → (b → a) → ForeignCodec a → ForeignCodec b
+prismaticCodec name preview view orig = C.basicCodec dec enc
+  where
+  dec f = do
+    a ← C.decode orig f
+    note (Named name (UnexpectedValue (_stringify f))) (preview a)
+  enc = C.encode orig <<< view
+
 --
 -- Helper functions 
 --
@@ -307,3 +356,4 @@ decodingError = runExcept <<< withExcept ForeignDecodingErrors
 
 foreign import _null ∷ Foreign
 foreign import _undefined ∷ Foreign
+foreign import _stringify ∷ Foreign → String
