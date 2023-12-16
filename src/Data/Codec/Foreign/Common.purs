@@ -1,10 +1,14 @@
-module Data.Codec.Foreign.Common where
+module Data.Codec.Foreign.Common 
+  ( module Data.Codec.Foreign.Common
+  , module Data.Codec.Foreign
+  ) where
 
 import Prelude hiding (map)
 
 import Data.Array as Array
 import Data.Codec (decode, encode, (~))
-import Data.Codec.Foreign (ForeignCodec, array, index, indexedArray, string)
+import Data.Codec.Foreign (Codec(..), Codec', ForeignCodec, FPropCodec, ForeignDecodingError(..), array, boolean,  codePoint, codec, codec', decode, encode, fix, hoist, identity, index, indexedArray, int, farray, fobject, foreign_, null, number, object, printForeignDecodingError, prismaticCodec, prop, record, recordProp, recordPropOptional, string, void, (<~<), (>~>), (~))
+-- char,named, coercible, 
 import Data.Codec.Foreign.Sum (taggedSum)
 import Data.Either (Either(..))
 import Data.Functor as F

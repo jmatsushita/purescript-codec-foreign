@@ -1,10 +1,41 @@
-module Data.Codec.Foreign where
+module Data.Codec.Foreign 
+  ( ForeignCodec
+  , ForeignDecodingError(..)
+  , printForeignDecodingError
+  , foreign_
+  , null
+  , boolean
+  , number
+  , int
+  , string
+  , codePoint
+  -- , char
+  , farray
+  , fobject
+  , void
+  , array
+  , FIndexedCodec
+  , indexedArray
+  , index
+  , FPropCodec
+  , object
+  , prop
+  , record
+  , recordProp
+  , recordPropOptional
+  , fix
+  -- , named
+  -- , coercible
+  , prismaticCodec
+  , module Codec
+  ) where
 
 import Prelude
 
 import Control.Monad.Except (runExcept, throwError, withExcept)
 import Data.Array as Array
 import Data.Bifunctor (lmap)
+import Data.Codec (Codec(..), Codec', codec, codec', decode, encode, hoist, identity, (<~<), (>~>), (~)) as Codec
 import Data.Codec as C
 import Data.Either (Either(..), either, note)
 import Data.Generic.Rep (class Generic)
@@ -21,6 +52,7 @@ import Foreign as F
 import Foreign.Object as FO
 import Partial.Unsafe (unsafePartial)
 import Prim.Row as Row
+import Record.Unsafe as Record
 import Type.Proxy (Proxy)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -175,17 +207,6 @@ type FPropCodec a =
     a
     a
 
--- object ∷ ∀ a. String → JPropCodec a → JsonCodec a
--- object name =
---   bihoistGCodec
---     (\r → ReaderT (BF.lmap (Named name) <<< runReaderT r <=< decode jobject))
---     (mapWriter (BF.rmap (J.fromObject <<< FO.fromFoldable)))
-
--- object name codec =
---   Codec.codec'
---     (\j → lmap (Named name) (Codec.decode codec =<< Codec.decode jobject j))
---     (\a → Codec.encode jobject (FO.fromFoldable (Codec.encode codec a)))
-
 -- | A codec for objects that are encoded with specific properties.
 object ∷ ∀ a. String → FPropCodec a → ForeignCodec a
 object name codec =
@@ -264,6 +285,45 @@ recordProp p codecA codecR =
 
   unsafeGet ∷ String → Record r' → a
   unsafeGet s = unsafePartial fromJust <<< FO.lookup s <<< unsafeCoerce
+
+-- | Used with `record` to define an optional field.
+-- |
+-- | This will only decode the property as `Nothing` if the field does not exist
+-- | in the object - having a values such as `null` assigned will need handling
+-- | separately.
+-- |
+-- | The property will be omitted when encoding and the value is `Nothing`.
+recordPropOptional
+  ∷ ∀ p a r r'
+  . IsSymbol p
+  ⇒ Row.Cons p (Maybe a) r r'
+  ⇒ Proxy p
+  → ForeignCodec a
+  → FPropCodec (Record r)
+  → FPropCodec (Record r')
+recordPropOptional p codecA codecR = C.codec dec' enc'
+  where
+  key ∷ String
+  key = reflectSymbol p
+
+  dec' ∷ FO.Object Foreign → Either ForeignDecodingError (Record r')
+  dec' obj = do
+    r ← C.decode codecR obj
+    a ← lmap (AtKey key) case FO.lookup key obj of
+      Just val → Just <$> C.decode codecA val
+      _ → Right Nothing
+    pure $ Record.unsafeSet key a r
+
+  enc' ∷ Record r' → List (Tuple String Foreign)
+  enc' val = do
+    let w = C.encode codecR (unsafeForget val)
+    case Record.unsafeGet key val of
+      Just a → Tuple key (C.encode codecA a) : w
+      Nothing → w
+
+  unsafeForget ∷ Record r' → Record r
+  unsafeForget = unsafeCoerce
+
 
 -- | Helper function for defining recursive codecs in situations where the codec
 -- | definition causes a _"The value of <codec> is undefined here"_ error.
