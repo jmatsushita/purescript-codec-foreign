@@ -3,23 +3,18 @@ module Data.Codec.Foreign where
 import Prelude
 
 import Control.Monad.Except (runExcept, throwError, withExcept)
-import Control.Monad.Reader (ReaderT(..), runReaderT)
-import Control.Monad.Writer (Writer, execWriter, mapWriter, writer)
 import Data.Array as Array
-import Data.Bifunctor (lmap, rmap)
+import Data.Bifunctor (lmap)
 import Data.Codec as C
 import Data.Either (Either(..), either, note)
 import Data.Generic.Rep (class Generic)
 import Data.List (List, (:))
-import Data.List as List
 import Data.List.NonEmpty (foldMap1)
 import Data.Maybe (Maybe(..), fromJust, maybe)
-import Data.Newtype (unwrap)
-import Data.Profunctor.Star (Star(..))
 import Data.String.CodePoints (CodePoint)
 import Data.String.CodePoints as S
 import Data.Symbol (class IsSymbol, reflectSymbol)
-import Data.Traversable (for)
+import Data.TraversableWithIndex (traverseWithIndex)
 import Data.Tuple (Tuple(..))
 import Foreign (F, Foreign, ForeignError(..), renderForeignError)
 import Foreign as F
@@ -65,39 +60,39 @@ printForeignDecodingError err =
     UnexpectedValue v → "\tUnexpected value: " <> show v
 
 -- | Codec type for `Foreign` values.
-type ForeignCodec a = C.BasicCodec (Either ForeignDecodingError) Foreign a
+type ForeignCodec a = C.Codec' (Either ForeignDecodingError) Foreign a
 
 -- | The "identity codec" for `Foreign` values.
 foreign_ ∷ ForeignCodec Foreign
-foreign_ = C.basicCodec pure identity
+foreign_ = C.codec' pure identity
 
 -- | A codec for `null` values in `Foreign`.
 null ∷ ForeignCodec Foreign
-null = C.hoistCodec (withExcept ForeignDecodingErrors >>> runExcept) $
-  C.basicCodec (\r → F.readNull r >>= f r) (const _null)
+null = C.hoist (withExcept ForeignDecodingErrors >>> runExcept) $
+  C.codec' (\r → F.readNull r >>= f r) (const _null)
   where
   f ∷ Foreign → Maybe Foreign → F Foreign
   f x = maybe (throwError $ pure $ TypeMismatch "null" (F.typeOf x)) pure
 
 -- | A codec for `Boolean` values in `Foreign`.
 boolean ∷ ForeignCodec Boolean
-boolean = basicDecodec (decodingError <<< F.readBoolean)
+boolean = decodec' (decodingError <<< F.readBoolean)
 
 -- | A codec for `Number` values in `Foreign`.
 number ∷ ForeignCodec Number
-number = basicDecodec (decodingError <<< F.readNumber)
+number = decodec' (decodingError <<< F.readNumber)
 
 -- | A codec for `Int` values in `Foreign`.
 int ∷ ForeignCodec Int
-int = basicDecodec (decodingError <<< F.readInt)
+int = decodec' (decodingError <<< F.readInt)
 
 -- | A codec for `String` values in `Foreign`.
 string ∷ ForeignCodec String
-string = basicDecodec (decodingError <<< F.readString)
+string = decodec' (decodingError <<< F.readString)
 
 -- | A codec for `Codepoint` values in `Foreign`.
 codePoint ∷ ForeignCodec CodePoint
-codePoint = C.basicCodec
+codePoint = C.codec'
   (decodeCodePoint <=< (decodingError <<< F.readString))
   (F.unsafeToForeign <<< S.singleton)
   where
@@ -108,17 +103,17 @@ codePoint = C.basicCodec
 
 -- | A codec for `Void` values.
 void ∷ ForeignCodec Void
-void = C.basicCodec (const $ throwError VoidError) absurd
+void = C.codec' (const $ throwError VoidError) absurd
 
 -- | A codec for `Array Foreign` values in `Foreign`. This does not decode
 -- | the values of the array, for that use `array` for a general array decoder,
 -- | or `indexedArray` with `index` to decode fixed length array encodings.
 farray ∷ ForeignCodec (Array Foreign)
-farray = basicDecodec (decodingError <<< F.readArray)
+farray = decodec' (decodingError <<< F.readArray)
 
 -- | A codec for `Object` values in `Foreign`.
 fobject ∷ ForeignCodec (FO.Object Foreign)
-fobject = basicDecodec $ decodingError <<< \f → case F.typeOf f of
+fobject = decodec' $ decodingError <<< \f → case F.typeOf f of
   "object" → pure $ unsafeCoerce f
   ty → throwError $ pure $ TypeMismatch ty "object"
 
@@ -132,14 +127,10 @@ fobject = basicDecodec $ decodingError <<< \f → case F.typeOf f of
 -- | codecIntArray = CF.array CF.int
 -- | ```
 array ∷ ∀ a. ForeignCodec a → ForeignCodec (Array a)
-array codec = C.GCodec dec enc
-  where
-  dec = ReaderT \f → do
-    foreigns ← C.decode farray f
-    for (Array.mapWithIndex Tuple foreigns) \(Tuple ix f') →
-      lmap (AtIndex ix) (C.decode codec f')
-  enc = Star \xs →
-    writer $ Tuple xs (F.unsafeToForeign (C.encode codec <$> xs))
+array codec 
+  = C.codec' 
+    ( \f → traverseWithIndex ( \ix a → lmap (AtIndex ix) (C.decode codec a)) =<< C.decode farray f)
+    (\a → F.unsafeToForeign (map (C.encode codec) a))
 
 -- | Codec type for specifically indexed `Array` elements.
 type FIndexedCodec a =
@@ -163,21 +154,17 @@ type FIndexedCodec a =
 -- |     <*> _.age ~ CF.index 1 CF.int
 -- | ```
 indexedArray ∷ ∀ a. String → FIndexedCodec a → ForeignCodec a
-indexedArray name =
-  C.bihoistGCodec
-    (\r → ReaderT (lmap (Named name) <<< runReaderT r <=< C.decode farray))
-    (mapWriter (rmap (F.unsafeToForeign <<< Array.fromFoldable)))
+indexedArray name codec =
+  C.codec'
+    (\j → lmap (Named name) (C.decode codec =<< C.decode farray j))
+    (\a -> C.encode farray (Array.fromFoldable (C.encode codec a)))
 
 -- | A codec for an item in an `indexedArray`.
 index ∷ ∀ a. Int → ForeignCodec a → FIndexedCodec a
-index ix codec = C.GCodec dec enc
-  where
-  dec = ReaderT \xs →
-    lmap (AtIndex ix) case Array.index xs ix of
-      Just val → C.decode codec val
-      Nothing → Left $ MissingValueAtIndex ix
-  enc = Star \val →
-    writer $ Tuple val (pure (C.encode codec val))
+index ix codec = 
+  C.codec
+    (\xs -> lmap (AtIndex ix) (maybe (Left $ MissingValueAtIndex ix) (C.decode codec) (Array.index xs ix)))
+    (pure <<< C.encode codec)
 
 -- | Codec type for `Object` prop/value pairs.
 type FPropCodec a =
@@ -188,25 +175,30 @@ type FPropCodec a =
     a
     a
 
+-- object ∷ ∀ a. String → JPropCodec a → JsonCodec a
+-- object name =
+--   bihoistGCodec
+--     (\r → ReaderT (BF.lmap (Named name) <<< runReaderT r <=< decode jobject))
+--     (mapWriter (BF.rmap (J.fromObject <<< FO.fromFoldable)))
+
+-- object name codec =
+--   Codec.codec'
+--     (\j → lmap (Named name) (Codec.decode codec =<< Codec.decode jobject j))
+--     (\a → Codec.encode jobject (FO.fromFoldable (Codec.encode codec a)))
+
 -- | A codec for objects that are encoded with specific properties.
 object ∷ ∀ a. String → FPropCodec a → ForeignCodec a
-object name =
-  C.bihoistGCodec
-    (\r → ReaderT (lmap (Named name) <<< runReaderT r <=< C.decode fobject))
-    (mapWriter (rmap (F.unsafeToForeign <<< FO.fromFoldable)))
+object name codec =
+  C.codec'
+    (\f → lmap (Named name) (C.decode codec =<< C.decode fobject f))
+    (\a -> C.encode fobject (FO.fromFoldable (C.encode codec a)))
+    -- (mapWriter (rmap (F.unsafeToForeign <<< FO.fromFoldable)))
 
 -- | A codec for a property of an object.
 prop ∷ ∀ a. String → ForeignCodec a → FPropCodec a
-prop key codec = C.GCodec dec enc
-  where
-  dec ∷ ReaderT (FO.Object Foreign) (Either ForeignDecodingError) a
-  dec = ReaderT \obj →
-    lmap (AtKey key) case FO.lookup key obj of
-      Just val → C.decode codec val
-      Nothing → Left $ MissingValueAtKey key
-
-  enc ∷ Star (Writer (List (Tuple String Foreign))) a a
-  enc = Star \val → writer $ Tuple val (pure (Tuple key (C.encode codec val)))
+prop key codec = C.codec 
+    (\obj → lmap (AtKey key) (maybe (Left $ MissingValueAtKey key) (C.decode codec) (FO.lookup key obj)))
+    (pure <<< Tuple key <<< C.encode codec)
 
 -- | The starting value for a object-record codec. Used with `recordProp` it
 -- | provides a convenient method for defining codecs for record types that
@@ -230,7 +222,7 @@ prop key codec = C.GCodec dec enc
 -- | See also `Data.Codec.Foreign.Record.object` for a more commonly useful
 -- | version of this function.
 record ∷ FPropCodec {}
-record = C.GCodec (pure {}) (Star \val → writer (Tuple val List.Nil))
+record = C.Codec (const (pure {})) pure
 
 -- | Used with `record` to define codecs for record types that encode into JSON
 -- | objects of the same shape. See the comment on `record` for an example.
@@ -243,12 +235,13 @@ recordProp
   → FPropCodec (Record r)
   → FPropCodec (Record r')
 recordProp p codecA codecR =
-  let key = reflectSymbol p in C.GCodec (dec' key) (enc' key)
+  let key = reflectSymbol p in C.codec (dec' key) (enc' key)
   where
   dec'
     ∷ String
-    → ReaderT (FO.Object Foreign) (Either ForeignDecodingError) (Record r')
-  dec' key = ReaderT \obj → do
+    → FO.Object Foreign 
+    → (Either ForeignDecodingError) (Record r')
+  dec' key obj = do
     r ← C.decode codecR obj
     a ← lmap (AtKey key) case FO.lookup key obj of
       Just val → C.decode codecA val
@@ -257,11 +250,11 @@ recordProp p codecA codecR =
 
   enc'
     ∷ String
-    → Star (Writer (List (Tuple String Foreign))) (Record r') (Record r')
-  enc' key = Star \val →
-    writer $ Tuple val
-      $ Tuple key (C.encode codecA (unsafeGet key val))
-          : C.encode codecR (unsafeForget val)
+    → Record r'
+    → List (Tuple String Foreign)
+  enc' key val = 
+    Tuple key (C.encode codecA (unsafeGet key val))
+      : C.encode codecR (unsafeForget val)
 
   unsafeForget ∷ Record r' → Record r
   unsafeForget = unsafeCoerce
@@ -292,7 +285,7 @@ recordProp p codecA codecR =
 -- |       CAR.object "IntList" { cell: CF.int, rest: CAC.maybe codec }
 -- | ```
 fix ∷ ∀ a. (ForeignCodec a → ForeignCodec a) → ForeignCodec a
-fix f = C.basicCodec (\x → C.decode (f (fix f)) x) (\x → C.encode (f (fix f)) x)
+fix f = C.codec' (\x → C.decode (f (fix f)) x) (\x → C.encode (f (fix f)) x)
 
 -- | Adapts an existing codec with a pair of functions to allow a value to be
 -- | further refined. If the inner decoder fails an `UnexpectedValue` error will
@@ -334,7 +327,7 @@ fix f = C.basicCodec (\x → C.decode (f (fix f)) x) (\x → C.encode (f (fix f)
 -- | ```
 prismaticCodec
   ∷ ∀ a b. String → (a → Maybe b) → (b → a) → ForeignCodec a → ForeignCodec b
-prismaticCodec name preview view orig = C.basicCodec dec enc
+prismaticCodec name preview view orig = C.codec' dec enc
   where
   dec f = do
     a ← C.decode orig f
@@ -347,23 +340,23 @@ harismaticCodec
   → (b → Either Foreign a)
   → ForeignCodec a
   → ForeignCodec b
-harismaticCodec view preview orig = C.basicCodec dec enc
+harismaticCodec view preview orig = C.codec' dec enc
   where
   dec = map view <<< C.decode orig
   enc = either identity (C.encode orig) <<< preview
 
 encodec ∷ ∀ a. ForeignCodec a → a → Foreign
-encodec c = execWriter <<< unwrap (C.encoder c)
+encodec codec = C.encode codec
 
 decodec ∷ ∀ a. ForeignCodec a → Foreign → Either ForeignDecodingError a
-decodec c = runReaderT (C.decoder c)
+decodec codec = C.decode codec
 
 --
 -- Helper functions 
 --
 
-basicDecodec ∷ ∀ a. (Foreign → Either ForeignDecodingError a) → ForeignCodec a
-basicDecodec g = C.basicCodec g F.unsafeToForeign
+decodec' ∷ ∀ a. (Foreign → Either ForeignDecodingError a) → ForeignCodec a
+decodec' g = C.codec' g F.unsafeToForeign
 
 decodingError ∷ ∀ a. F a → Either ForeignDecodingError a
 decodingError = runExcept <<< withExcept ForeignDecodingErrors
